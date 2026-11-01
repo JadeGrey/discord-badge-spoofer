@@ -21,15 +21,15 @@ no dependencies - pure python stdlib (needs python 3.10+).
 
 2. first run asks for your discord account token. paste it and it gets saved to `science_state.json` (reused after that). the analytics token is fetched automatically from `GET /users/@me?with_analytics_token=true`.
 
-3. you also need a cookie (`cf_clearance`). on startup it'll ask for one, or you can add/update it later via option `3` (refresh auth). grab the full `cookie` header from any `/science` request in devtools (network tab). it gets saved to `science_state.json`.
+3. you also need a cookie (`cf_clearance`). on startup it'll ask for one, or you can add/update it later via option `2` (refresh auth). grab the full `cookie` header from any `/science` request in devtools (network tab). it gets saved to `science_state.json`.
 
 5. **optional: fingerprint for games-played count.** the fingerprint isn't strictly necessary - users have reported getting the games-played badge without setting one. if you want to set it, grab a real `executable_fingerprint` from a `launch_game` request in your client's devtools and add it to `science_state.json` as `"fingerprint": "..."`.
 
 ## menu
 
-- `1` claim playtime - asks for hours per game, applies to every game
-- `2` games played - marks every game as played (1 minute each)
-- `3` refresh auth - pulls a fresh analytics token and lets you update the cookie
+- `1` claim games - asks how many games and hours per game
+- `2` refresh auth - pulls a fresh analytics token and lets you update the cookie
+- `3` set fingerprint - generates an `executable_fingerprint` from a game's `.exe` (windows only)
 - `4` exit
 
 ## how auth works
@@ -37,7 +37,7 @@ no dependencies - pure python stdlib (needs python 3.10+).
 - `token` - your account token, entered on first run, saved to `science_state.json`
 - `analytics_token` - fetched from `GET /users/@me?with_analytics_token=true`
 - `super_props` / heartbeat / launch ids - generated automatically
-- `cookie` (cf_clearance) - pasted by hand, via option `3`
+- `cookie` (cf_clearance) - pasted by hand, via option `2`
 - `fingerprint` - optional, only needed for the games-played count (see below)
 
 badges update on discord's analytics cycle (1-2 days), so don't expect to see results right away.
@@ -56,6 +56,11 @@ either way, the tool will post the events - we just want feedback on whether the
 
 this breaks discord's terms of service. use it on accounts you're fine losing.
 provided as-is with no warranty.
+
+## credits
+
+- original tool by [revere group](https://github.com/revere-group)
+- console ui refresh by [JadeGrey](https://github.com/JadeGrey)
 
 ## license
 

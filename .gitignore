@@ -8,3 +8,8 @@ __pycache__/
 
 # game cache
 data/
+
+# local notes and test output
+research.md
+stream_test.py
+stream_test_report_*.json

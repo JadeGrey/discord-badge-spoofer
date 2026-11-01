@@ -3,6 +3,7 @@
 discord science spoofer - inflate the playtime and games-played badges.
 
 revere group, 2026. mit licensed (see LICENSE).
+ui refresh by JadeGrey.
 
 posts launch_game and running_game_heartbeat events to /api/v9/science, the same
 endpoint the real client uses to credit playtime. duration_tracked_ms isn't
@@ -13,7 +14,7 @@ run:
 
 auth bits:
     token            your account token, entered on first run           [saved]
-    cookie           cf_clearance, pasted by hand via menu option 3     [saved]
+    cookie           cf_clearance, pasted by hand via menu option 2     [saved]
     fingerprint      optional, only for the games-played count          [saved]
     analytics_token  fetched from GET /users/@me?with_analytics_token=true, cached
     super_props      from cordapi.dolfi.es (fallback: local)            [per run]
@@ -238,7 +239,8 @@ class Console:
     WHITE = "\x1b[97m"
     GREY = "\x1b[90m"
     RESET = "\x1b[0m"
-    RULE = "─" * 44
+    WIDTH = 44
+    RULE = "─" * WIDTH
 
     def __init__(self) -> None:
         try:
@@ -281,6 +283,19 @@ class Console:
     def info(self, detail: str) -> None:
         print(f"  {self._stamp()} {self.GREY}·{self.RESET} {self.WHITE}{detail}{self.RESET}")
 
+    def row(self, detail: str = "") -> None:
+        # indented line with no timestamp, for static panels like the menu
+        print(f"  {detail}")
+
+    def flag(self, label: str, on: bool) -> str:
+        dot = f"{self.GREEN}●{self.RESET}" if on else f"{self.GREY}○{self.RESET}"
+        return f"{dot} {self.WHITE if on else self.GREY}{label}{self.RESET}"
+
+    def _boxed(self, plain: str, colored: str) -> str:
+        # pad off the plain text's length so ansi codes don't throw the border out
+        pad = " " * (self.WIDTH - 4 - len(plain))
+        return f"  {self.GREY}│{self.RESET} {colored}{pad} {self.GREY}│{self.RESET}"
+
     def rule(self) -> None:
         print(f"  {self.GREY}{self.RULE}{self.RESET}")
 
@@ -291,8 +306,16 @@ class Console:
     def banner(self) -> None:
         self.clear()
         print()
-        print(f"  {self.ORANGE}spoofer{self.RESET} {self.GREY}·{self.RESET} {self.WHITE}discord badges{self.RESET}")
-        print(f"    {self.GREY}by revere group{self.RESET}")
+        print(f"  {self.GREY}╭{'─' * (self.WIDTH - 2)}╮{self.RESET}")
+        print(self._boxed(
+            "spoofer · discord badges",
+            f"{self.ORANGE}spoofer{self.RESET} {self.GREY}·{self.RESET} {self.WHITE}discord badges{self.RESET}",
+        ))
+        print(self._boxed(
+            "by revere group · ui by JadeGrey",
+            f"{self.GREY}by revere group · ui by {self.RESET}{self.ORANGE}JadeGrey{self.RESET}",
+        ))
+        print(f"  {self.GREY}╰{'─' * (self.WIDTH - 2)}╯{self.RESET}")
         print()
 
 
@@ -638,7 +661,7 @@ class Spoofer:
                 self.console.sent(f"batch {request_no}", f"{sent_ok}/{total} games")
             elif status in (401, 403):
                 self.console.err(f"batch {request_no}",
-                                 f"[{status}] auth rejected · refresh (option 3) with a fresh cookie")
+                                 f"[{status}] auth rejected · refresh (option 2) with a fresh cookie")
                 return sent_ok
             else:
                 self.console.warn(f"batch {request_no}", f"[{status}]")
@@ -768,7 +791,7 @@ class App:
 
     def _require_ready(self) -> bool:
         if not self.state.has_cookie:
-            self.console.err("cookie", "not set · use option 3 to add one")
+            self.console.err("cookie", "not set · use option 2 to add one")
             return False
         if self.state.is_stale:
             try:
@@ -905,14 +928,22 @@ class App:
             C.clear()
             C.banner()
             print()
-            # show stats
-            C.info(f"loaded {C.ORANGE}{len(self.games)}{C.WHITE} games")
-            C.info(f"claimed {C.ORANGE}{self.state.total_games_claimed}{C.WHITE} games · {C.ORANGE}{self.state.total_hours_claimed:,.0f}h{C.WHITE} total")
+            C.row(
+                f"{C.flag('token', self.state.has_token)}   "
+                f"{C.flag('cookie', self.state.has_cookie)}   "
+                f"{C.flag('fingerprint', bool(self.state.fingerprint))}"
+            )
             C.rule()
-            C.info(f"{C.ORANGE}1{C.RESET} · claim games")
-            C.info(f"{C.ORANGE}2{C.RESET} · refresh auth")
-            C.info(f"{C.ORANGE}3{C.RESET} · set fingerprint")
-            C.info(f"{C.ORANGE}4{C.RESET} · exit")
+            C.row(f"{C.GREY}games    {C.ORANGE}{len(self.games)}{C.RESET} {C.GREY}loaded{C.RESET}")
+            C.row(
+                f"{C.GREY}claimed  {C.ORANGE}{self.state.total_games_claimed}{C.RESET} {C.GREY}games · "
+                f"{C.RESET}{C.ORANGE}{self.state.total_hours_claimed:,.0f}h{C.RESET} {C.GREY}total{C.RESET}"
+            )
+            C.rule()
+            C.row(f"{C.ORANGE}1{C.RESET}  {C.WHITE}claim games{C.RESET}")
+            C.row(f"{C.ORANGE}2{C.RESET}  {C.WHITE}refresh auth{C.RESET}")
+            C.row(f"{C.ORANGE}3{C.RESET}  {C.WHITE}set fingerprint{C.RESET}")
+            C.row(f"{C.ORANGE}4{C.RESET}  {C.WHITE}exit{C.RESET}")
             C.rule()
             choice = input(f"  {C.ORANGE}›{C.RESET} ").strip()
             print()
