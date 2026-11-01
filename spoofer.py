@@ -26,15 +26,18 @@ this breaks discord tos. your account, your problem.
 from __future__ import annotations
 
 import base64
+import itertools
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Iterator, Sequence
@@ -230,24 +233,48 @@ def generate_fingerprint(user_id: str, path: str = "", pid: int = 0) -> str:
 
 
 class Console:
-    """colored console output."""
+    """console output. colors, glyphs and animation fall back to plain text off a tty or under NO_COLOR."""
 
-    RED = "\x1b[91m"
-    ORANGE = "\x1b[38;5;208m"
+    PURPLE = "\x1b[38;5;183m"
+    PINK = "\x1b[38;5;211m"
     GREEN = "\x1b[92m"
     YELLOW = "\x1b[93m"
+    AMBER = "\x1b[33m"
+    RED = "\x1b[91m"
     WHITE = "\x1b[97m"
     GREY = "\x1b[90m"
+    BOLD = "\x1b[1m"
     RESET = "\x1b[0m"
-    WIDTH = 44
-    RULE = "─" * WIDTH
+    PALETTE = ("PURPLE", "PINK", "GREEN", "YELLOW", "AMBER", "RED", "WHITE", "GREY", "BOLD", "RESET")
+    WIDTH = 46
+    BAR_WIDTH = 24
+
+    FANCY = {
+        "ok": "✓", "err": "✗", "warn": "!", "dot": "·", "cur": "❯", "gem": "◆",
+        "tl": "╭", "tr": "╮", "bl": "╰", "br": "╯", "h": "─", "v": "│",
+        "bar_on": "━", "bar_off": "━", "spin": "⣾⣽⣻⢿⡿⣟⣯⣷",
+        "keys": "↑/↓ choose · enter confirm · esc quit",
+    }
+    PLAIN = {
+        "ok": "+", "err": "x", "warn": "!", "dot": "-", "cur": ">", "gem": "*",
+        "tl": "+", "tr": "+", "bl": "+", "br": "+", "h": "-", "v": "|",
+        "bar_on": "#", "bar_off": "-", "spin": "|/-\\",
+        "keys": "up/down choose - enter confirm - esc quit",
+    }
 
     def __init__(self) -> None:
         try:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # glyphs must encode even when stdout is piped
         except Exception:
             pass
-        if sys.platform == "win32":
+        # color + animation only for a real terminal; NO_COLOR / TERM=dumb opt out, FORCE_COLOR opts in
+        wants_color = sys.stdout.isatty() or bool(os.environ.get("FORCE_COLOR"))
+        self.fancy = wants_color and not os.environ.get("NO_COLOR") and os.environ.get("TERM") != "dumb"
+        self.g = self.FANCY if self.fancy else self.PLAIN
+        if not self.fancy:
+            for name in self.PALETTE:
+                setattr(self, name, "")
+        elif sys.platform == "win32":
             self._enable_ansi()
 
     @staticmethod
@@ -261,62 +288,163 @@ class Console:
         if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
             kernel32.SetConsoleMode(handle, mode.value | 0x0004)
 
-    def _stamp(self) -> str:
-        return f"{self.GREY}{time.strftime('%H:%M:%S')}{self.RESET}"
+    # lines
 
     def _line(self, glyph: str, target: str, detail: str, color: str) -> None:
-        print(f"  {self._stamp()} {glyph} {self.WHITE}{target}{self.RESET} "
-              f"{self.GREY}·{self.RESET} {color}{detail}{self.RESET}")
+        print(f"  {glyph} {self.WHITE}{target}{self.RESET} "
+              f"{self.GREY}{self.g['dot']}{self.RESET} {color}{detail}{self.RESET}")
 
     def ok(self, target: str, detail: str) -> None:
-        self._line(f"{self.GREEN}✓{self.RESET}", target, detail, self.GREEN)
-
-    def sent(self, target: str, detail: str) -> None:
-        self._line(f"{self.GREY}·{self.RESET} {self.GREEN}sent{self.RESET}", target, detail, self.GREEN)
+        self._line(f"{self.GREEN}{self.g['ok']}{self.RESET}", target, detail, self.GREEN)
 
     def warn(self, target: str, detail: str) -> None:
-        self._line(f"{self.YELLOW}!{self.RESET}", target, detail, self.YELLOW)
+        self._line(f"{self.YELLOW}{self.g['warn']}{self.RESET}", target, detail, self.YELLOW)
 
     def err(self, target: str, detail: str) -> None:
-        self._line(f"{self.RED}✗{self.RESET}", target, detail, self.RED)
+        self._line(f"{self.RED}{self.g['err']}{self.RESET}", target, detail, self.RED)
 
     def info(self, detail: str) -> None:
-        print(f"  {self._stamp()} {self.GREY}·{self.RESET} {self.WHITE}{detail}{self.RESET}")
+        print(f"  {self.PURPLE}{self.g['dot']}{self.RESET} {self.WHITE}{detail}{self.RESET}")
 
     def row(self, detail: str = "") -> None:
-        # indented line with no timestamp, for static panels like the menu
+        # indented line with no glyph, for static panels like the menu
         print(f"  {detail}")
 
-    def flag(self, label: str, on: bool) -> str:
-        dot = f"{self.GREEN}●{self.RESET}" if on else f"{self.GREY}○{self.RESET}"
-        return f"{dot} {self.WHITE if on else self.GREY}{label}{self.RESET}"
-
-    def _boxed(self, plain: str, colored: str) -> str:
-        # pad off the plain text's length so ansi codes don't throw the border out
-        pad = " " * (self.WIDTH - 4 - len(plain))
-        return f"  {self.GREY}│{self.RESET} {colored}{pad} {self.GREY}│{self.RESET}"
+    def flag(self, label: str, on: bool, required: bool = True) -> str:
+        # "label ✓" when set; a missing required item is red, a missing optional one a quiet amber
+        g = self.g
+        if on:
+            return f"{self.WHITE}{label}{self.RESET} {self.GREEN}{g['ok']}{self.RESET}"
+        if required:
+            return f"{self.WHITE}{label}{self.RESET} {self.RED}{g['err']}{self.RESET}"
+        return f"{self.GREY}{label}{self.RESET} {self.AMBER}{g['warn']}{self.RESET}"
 
     def rule(self) -> None:
-        print(f"  {self.GREY}{self.RULE}{self.RESET}")
+        print(f"  {self.GREY}{self.g['h'] * self.WIDTH}{self.RESET}")
 
     def clear(self) -> None:
         # clear screen + scrollback, home the cursor (vt processing is enabled)
-        print("\x1b[2J\x1b[3J\x1b[H", end="")
+        if self.fancy:
+            print("\x1b[2J\x1b[3J\x1b[H", end="")
+
+    # panels
+
+    def _box(self, title: str, rows: Sequence[tuple[str, str]]) -> None:
+        # rows are (plain, colored) pairs; padding comes off the plain text so ansi codes don't skew the border
+        g = self.g
+        top = g["h"] * (self.WIDTH - len(title) - 5)
+        print(f"  {self.PURPLE}{g['tl']}{g['h']}{self.RESET} {self.PINK}{title}{self.RESET} "
+              f"{self.PURPLE}{top}{g['tr']}{self.RESET}")
+        for plain, colored in rows:
+            pad = " " * (self.WIDTH - 4 - len(plain))
+            print(f"  {self.PURPLE}{g['v']}{self.RESET} {colored}{pad} {self.PURPLE}{g['v']}{self.RESET}")
+        print(f"  {self.PURPLE}{g['bl']}{g['h'] * (self.WIDTH - 2)}{g['br']}{self.RESET}")
 
     def banner(self) -> None:
         self.clear()
         print()
-        print(f"  {self.GREY}╭{'─' * (self.WIDTH - 2)}╮{self.RESET}")
-        print(self._boxed(
-            "spoofer · discord badges",
-            f"{self.ORANGE}spoofer{self.RESET} {self.GREY}·{self.RESET} {self.WHITE}discord badges{self.RESET}",
-        ))
-        print(self._boxed(
-            "by revere group · ui by JadeGrey",
-            f"{self.GREY}by revere group · ui by {self.RESET}{self.ORANGE}JadeGrey{self.RESET}",
-        ))
-        print(f"  {self.GREY}╰{'─' * (self.WIDTH - 2)}╯{self.RESET}")
+        dot = self.g["dot"]
+        self._box(f"{self.g['gem']} spoofer", [
+            ("discord badges", f"{self.WHITE}discord badges{self.RESET}"),
+            (f"by revere group {dot} ui by JadeGrey",
+             f"{self.GREY}by revere group {dot} ui by {self.RESET}{self.PINK}JadeGrey{self.RESET}"),
+        ])
         print()
+
+    def bar(self, frac: float) -> str:
+        on = round(max(0.0, min(1.0, frac)) * self.BAR_WIDTH)
+        return (f"{self.PURPLE}{self.g['bar_on'] * on}{self.GREY}{self.g['bar_off'] * (self.BAR_WIDTH - on)}"
+                f"{self.RESET} {self.WHITE}{frac:.0%}{self.RESET}")
+
+    # motion
+
+    @contextmanager
+    def spin(self, text: str) -> Iterator[None]:
+        """animate a spinner beside `text` while the body runs. silent when output isn't a terminal."""
+        if not self.fancy:
+            yield
+            return
+        stop = threading.Event()
+
+        def run() -> None:
+            for frame in itertools.cycle(self.g["spin"]):
+                if stop.is_set():
+                    return
+                print(f"\r  {self.PURPLE}{frame}{self.RESET} {text}", end="", flush=True)
+                time.sleep(0.08)
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            worker.join()
+            print("\r\x1b[2K", end="", flush=True)
+
+    # menus
+
+    @property
+    def arrows(self) -> bool:
+        # arrow-key menus need a real windows console; anywhere else falls back to a numbered prompt
+        return self.fancy and sys.platform == "win32" and sys.stdin.isatty()
+
+    @staticmethod
+    def _read_key() -> str:
+        import msvcrt
+
+        ch = msvcrt.getwch()
+        if ch in ("\x00", "\xe0"):  # arrow keys arrive as a prefix + a scan code
+            return {"H": "up", "P": "down"}.get(msvcrt.getwch(), "")
+        if ch == "\x03":
+            raise KeyboardInterrupt
+        return {"\r": "enter", "\x1b": "esc"}.get(ch, ch)
+
+    def choose(self, options: Sequence[str], footer: str = "") -> int | None:
+        """pick one option. returns its index, or None if the user backs out (esc/q, or a blank numbered prompt)."""
+        if not self.arrows:
+            return self._choose_numbered(options)
+        g = self.g
+        idx, drawn = 0, False
+        height = len(options) + (2 if footer else 0)
+        while True:
+            if drawn:
+                print(f"\x1b[{height}A", end="")  # back up over the list and redraw in place
+            drawn = True
+            for i, label in enumerate(options):
+                if i == idx:
+                    print(f"\x1b[2K  {self.PURPLE}{g['cur']}{self.RESET} {self.BOLD}{self.PINK}{label}{self.RESET}")
+                else:
+                    print(f"\x1b[2K    {self.GREY}{label}{self.RESET}")
+            if footer:
+                print("\x1b[2K")
+                print(f"\x1b[2K  {self.GREY}{footer}{self.RESET}")
+            key = self._read_key()
+            if key == "up":
+                idx = (idx - 1) % len(options)
+            elif key == "down":
+                idx = (idx + 1) % len(options)
+            elif key == "enter":
+                return idx
+            elif key in ("esc", "q"):
+                return None
+            elif key.isascii() and key.isdigit() and 1 <= int(key) <= len(options):
+                return int(key) - 1  # number keys still jump straight to an option
+
+    def _choose_numbered(self, options: Sequence[str]) -> int | None:
+        for i, label in enumerate(options, 1):
+            self.row(f"{self.PINK}{i}{self.RESET} {self.WHITE}{label}{self.RESET}")
+        print()
+        while True:
+            try:
+                raw = input(f"  {self.PURPLE}{self.g['cur']}{self.RESET} ").strip()
+            except EOFError:
+                return None
+            if not raw:
+                return None
+            if raw.isascii() and raw.isdigit() and 1 <= int(raw) <= len(options):
+                return int(raw) - 1
+            self.warn("input", "invalid option")
 
 
 @dataclass
@@ -649,16 +777,20 @@ class Spoofer:
 
     def run(self, games: Sequence[Game], build_events) -> int:
         # build_events(game) -> list of event dicts to send for that game
+        C = self.console
         total = len(games)
         sent_ok = 0
         for request_no, chunk in enumerate(_chunked(games, BATCH_SIZE), start=1):
             events = []
             for game in chunk:
                 events.extend(build_events(game))
-            status = self.client.post(events)
+            label = (f"{C.WHITE}batch {request_no}{C.RESET} {C.GREY}{C.g['dot']} sending{C.RESET}  "
+                     f"{C.bar(sent_ok / total)}")
+            with C.spin(label):
+                status = self.client.post(events)
             if status == 204:
                 sent_ok += len(chunk)
-                self.console.sent(f"batch {request_no}", f"{sent_ok}/{total} games")
+                self.console.ok(f"batch {request_no}", f"{sent_ok}/{total} games")
             elif status in (401, 403):
                 self.console.err(f"batch {request_no}",
                                  f"[{status}] auth rejected · refresh (option 2) with a fresh cookie")
@@ -717,7 +849,7 @@ class App:
             C.info(f"tried {GAMES_FILE} and {GAMES_CDN_URL}")
             C.info("check your connection, or drop a valid games.json at the path above")
             return
-        C.ok("games", f"{C.ORANGE}{len(self.games)}{C.WHITE} loaded")
+        C.ok("games", f"{C.PINK}{len(self.games)}{C.WHITE} loaded")
         time.sleep(0.5)
 
         # step 4: fingerprint warning
@@ -839,8 +971,8 @@ class App:
         total_hours = len(selected) * hours
         print()
         C.info(
-            f"claiming {C.ORANGE}{hours:g}h{C.WHITE} on "
-            f"{C.ORANGE}{len(selected)}{C.WHITE} games "
+            f"claiming {C.PINK}{hours:g}h{C.WHITE} on "
+            f"{C.PINK}{len(selected)}{C.WHITE} games "
             f"{C.GREY}·{C.WHITE} {total_hours:,.0f}h total"
         )
         C.rule()
@@ -856,7 +988,7 @@ class App:
         self.state.save()
 
         C.rule()
-        input(f"  {C.ORANGE}›{C.RESET} press enter to continue")
+        input(f"  {C.PINK}›{C.RESET} press enter to continue")
         C.rule()
 
     def _select_games(self, count: int) -> list[Game]:
@@ -897,7 +1029,7 @@ class App:
             time.sleep(1.5)
             return
         C.info("generate an executable_fingerprint tied to this account + machine")
-        C.info(f"account: {C.ORANGE}{uid}{C.RESET}")
+        C.info(f"account: {C.PINK}{uid}{C.RESET}")
         C.info("point it at a game's .exe (or a running game's pid)")
         entered = input(f"  {C.GREY}exe path or pid:{C.RESET} ").strip().strip('"')
         if not entered:
@@ -924,39 +1056,26 @@ class App:
 
     def menu(self) -> None:
         C = self.console
+        options = ["claim games", "refresh auth", "set fingerprint", "exit"]
+        actions = (self.claim_games, self._refresh, self.set_fingerprint)
         while True:
-            C.clear()
             C.banner()
-            print()
             C.row(
                 f"{C.flag('token', self.state.has_token)}   "
                 f"{C.flag('cookie', self.state.has_cookie)}   "
-                f"{C.flag('fingerprint', bool(self.state.fingerprint))}"
+                f"{C.flag('fingerprint', bool(self.state.fingerprint), required=False)}"
             )
-            C.rule()
-            C.row(f"{C.GREY}games    {C.ORANGE}{len(self.games)}{C.RESET} {C.GREY}loaded{C.RESET}")
             C.row(
-                f"{C.GREY}claimed  {C.ORANGE}{self.state.total_games_claimed}{C.RESET} {C.GREY}games · "
-                f"{C.RESET}{C.ORANGE}{self.state.total_hours_claimed:,.0f}h{C.RESET} {C.GREY}total{C.RESET}"
+                f"{C.GREY}{len(self.games):,} games {C.g['dot']} {self.state.total_games_claimed} claimed "
+                f"{C.g['dot']} {self.state.total_hours_claimed:,.0f}h total{C.RESET}"
             )
-            C.rule()
-            C.row(f"{C.ORANGE}1{C.RESET}  {C.WHITE}claim games{C.RESET}")
-            C.row(f"{C.ORANGE}2{C.RESET}  {C.WHITE}refresh auth{C.RESET}")
-            C.row(f"{C.ORANGE}3{C.RESET}  {C.WHITE}set fingerprint{C.RESET}")
-            C.row(f"{C.ORANGE}4{C.RESET}  {C.WHITE}exit{C.RESET}")
-            C.rule()
-            choice = input(f"  {C.ORANGE}›{C.RESET} ").strip()
             print()
-            if choice == "1":
-                self.claim_games()
-            elif choice == "2":
-                self._refresh()
-            elif choice == "3":
-                self.set_fingerprint()
-            elif choice in ("4", ""):
+            C.row(f"{C.PINK}What do you want to do?{C.RESET}")
+            choice = C.choose(options, footer=C.g["keys"])
+            print()
+            if choice is None or choice == len(actions):
                 break
-            else:
-                C.warn("input", "invalid option")
+            actions[choice]()
 
 
 def main() -> None:

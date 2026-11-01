@@ -13,3 +13,6 @@ data/
 research.md
 stream_test.py
 stream_test_report_*.json
+
+# brainstorming mockups
+.superpowers/
